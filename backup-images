@@ -1,0 +1,85 @@
+#!/bin/bash
+#
+# This script backup VMs.
+#
+# 1. Copy .xml domain files
+# 2. Shutdown VMs
+# 3. New snapshot
+# 4. Start VMs
+# 5. Start destination (wakeonlan)
+# 6. ZFS send
+# 7. Shutdown Rohan
+#
+# $BASE_SNAPSHOT must exists on destination.
+#
+# $BASE_SNAPSHOT may be transferred manually:
+#
+#   zfs send -R pool/images@2017-06-03_12:50:49 | ssh root@192.168.9 "zfs receive -v -F backup/images"
+#
+
+SCRIPT=`basename $0`
+DOMAINS=`virsh list --name --state-running`
+BASE_SNAPSHOT="pool/images@2017-06-04"
+SRC_DATASET="pool/images"
+DATE_TIME=`date +%F_%T`
+NEW_SNAPSHOT="$SRC_DATASET@$DATE_TIME"
+
+function log () {
+        logger -t $SCRIPT $1
+}
+
+log "Start $SCRIPT"
+
+# Copy .xml domain files
+#
+log "copy .xml domain files"
+cp -a /etc/libvirt/qemu /mnt/pool/images/backup/ && log "Ok"
+
+# Shutdown VMs
+#
+log "Shutting down VMs:"
+for x in $DOMAINS
+do
+        log " Shutting down: $x"
+        virsh shutdown $x
+done
+
+until [ 1 -eq `virsh list --name --state-running | wc -l` ]
+do
+        log "Waiting for the VMs to shutdown..."
+        sleep 5
+done
+log "All VMs stopped."
+
+# New snapshot
+zfs snapshot $NEW_SNAPSHOT && log "Created new snapshot: $NEW_SNAPSHOT"
+
+# Start VMs
+#
+log "Starting VMs:"
+for x in $DOMAINS
+do
+        log " Starting: $x"
+        virsh start $x
+done
+
+# Start destination (Gondolin)
+# Gondolin needs 30 seconds to boot but we wait 60 seconds
+log "Wake On LAN: Gondolin"
+wakeonlan 78:e7:d1:d2:2d:72
+log "Waiting for Gondolin to boot"
+sleep 60
+
+# ZFS send
+#
+log "Start zfs send to Gondolin"
+zfs send -R -I $BASE_SNAPSHOT $NEW_SNAPSHOT | ssh root@192.168.0.9 "zfs receive -v -F backup/images" && log "zfs send completed"
+
+# Shutdown Gondolin
+#
+log "Shutting down Gondolin"
+ssh root@192.168.0.9 "init 0"
+
+log "End $SCRIPT"
+
+
