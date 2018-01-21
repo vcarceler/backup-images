@@ -19,10 +19,13 @@
 
 SCRIPT=`basename $0`
 DOMAINS=`virsh list --name --state-running`
-BASE_SNAPSHOT="pool/images@2017-06-04"
+BASE_SNAPSHOT_FILE="/root/bin/base_snapshot"
+#BASE_SNAPSHOT="pool/images@2017-06-04"
+BASE_SNAPSHOT=`cat $BASE_SNAPSHOT_FILE`
 SRC_DATASET="pool/images"
 DATE_TIME=`date +%F_%T`
 NEW_SNAPSHOT="$SRC_DATASET@$DATE_TIME"
+MAX_SNAPSHOTS=20
 
 function log () {
         logger -t $SCRIPT $1
@@ -73,13 +76,22 @@ sleep 60
 # ZFS send
 #
 log "Start zfs send to Gondolin"
-zfs send -R -I $BASE_SNAPSHOT $NEW_SNAPSHOT | ssh root@192.168.0.9 "zfs receive -v -F backup/images" && log "zfs send completed"
+zfs send -R -I $BASE_SNAPSHOT $NEW_SNAPSHOT | ssh root@192.168.0.9 "zfs receive -v -F backup/images" && echo $NEW_SNAPSHOT >$BASE_SNAPSHOT_FILE && log "zfs send completed"
 
 # Shutdown Gondolin
 #
 log "Shutting down Gondolin"
 ssh root@192.168.0.9 "init 0"
 
+# Snapshot destroy
+c=0
+for snapshot in `zfs list -H -o name -t snapshot -S creation | grep $SRC_DATASET`
+do
+        c=`expr $c + 1`
+        [ $c -gt $MAX_SNAPSHOTS ] && zfs destroy $snapshot
+done
+
+# End script
 log "End $SCRIPT"
 
 
