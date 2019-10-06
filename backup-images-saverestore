@@ -1,0 +1,93 @@
+#!/bin/bash
+#
+# This script backup VMs.
+#
+# 1. Copy .xml domain files
+# 2. Save VMs
+# 3. New snapshot
+# 4. Restore VMs
+# 5. Start destination (wakeonlan)
+# 6. ZFS send
+# 7. Shutdown Rohan
+#
+# $BASE_SNAPSHOT must exists on destination.
+#
+# $BASE_SNAPSHOT may be transferred manually:
+#
+#   zfs send -R pool/images@2017-06-03_12:50:49 | ssh root@192.168.9 "zfs receive -v -F backup/images"
+#
+
+SCRIPT=`basename $0`
+DOMAINS=`virsh list --name --state-running`
+BASE_SNAPSHOT_FILE="/root/bin/base_snapshot"
+#BASE_SNAPSHOT="pool/images@2017-06-04"
+BASE_SNAPSHOT=`cat $BASE_SNAPSHOT_FILE`
+SRC_DATASET="pool/images"
+DATE_TIME=`date +%F_%T`
+NEW_SNAPSHOT="$SRC_DATASET@$DATE_TIME"
+MAX_SNAPSHOTS=20
+
+function log () {
+        logger -t $SCRIPT $1
+}
+
+log "Start $SCRIPT"
+
+# Copy .xml domain files
+#
+log "copy .xml domain files"
+cp -a /etc/libvirt/qemu /mnt/pool/images/backup/ && log "Ok"
+
+# Save VMs
+#
+log "Saving VMs:"
+for x in $DOMAINS
+do
+        log " Saving: $x"
+        virsh save $x /mnt/pool/images/save/$x.vmsave
+done
+log "All VMs saved."
+
+# New snapshot
+log "Creating snapshot $NEW_SNAPSHOT"
+/sbin/zfs snapshot $NEW_SNAPSHOT && log "Created new snapshot: $NEW_SNAPSHOT"
+
+# Start VMs
+#
+log "Restoring VMs:"
+for x in $DOMAINS
+do
+        log " Restoring: $x"
+        virsh restore /mnt/pool/images/save/$x.vmsave && rm /mnt/pool/images/save/$x.vmsave
+done
+log "All VMs restored."
+
+# Start destination (Gondolin)
+# Gondolin needs 30 seconds to boot but we wait 60 seconds
+log "Wake On LAN: Gondolin"
+wakeonlan 78:e7:d1:d2:2d:72
+log "Waiting for Gondolin to boot"
+sleep 60
+
+# ZFS send
+#
+log "Start zfs send to Gondolin"
+log "BASE_SNAPSHOT=$BASE_SNAPSHOT NEW_SNAPSHOT=$NEW_SNAPSHOT"
+/sbin/zfs send -R -I $BASE_SNAPSHOT $NEW_SNAPSHOT | ssh root@192.168.0.9 "zfs receive -v -F backup/images" && echo $NEW_SNAPSHOT >$BASE_SNAPSHOT_FILE && log "zfs send completed"
+
+# Shutdown Gondolin
+#
+log "Shutting down Gondolin"
+ssh root@192.168.0.9 "init 0"
+
+# Snapshot destroy
+c=0
+for snapshot in `zfs list -H -o name -t snapshot -S creation | grep $SRC_DATASET`
+do
+        c=`expr $c + 1`
+        [ $c -gt $MAX_SNAPSHOTS ] && /sbin/zfs destroy $snapshot && log "Deleted snapshot: $snapshot"
+done
+
+# End script
+log "End $SCRIPT"
+
